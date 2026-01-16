@@ -213,7 +213,8 @@ spec:
 
 ## 6️⃣ Snapshot Cleanup (7-day Retention)
 
-```yamlapiVersion: batch/v1
+```yaml
+apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: postgres-snapshot-cleanup
