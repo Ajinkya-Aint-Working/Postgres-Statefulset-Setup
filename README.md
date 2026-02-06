@@ -8,7 +8,7 @@ This document explains how to deploy **PostgreSQL as a StatefulSet** on Kubernet
 - Connection restrictions using `pg_hba.conf`
 - Automated CSI **VolumeSnapshots**
 - Snapshot retention (7 days)
-- Clean RBAC model (1 ServiceAccount / Role / RoleBinding per namespace)
+- Clean RBAC model (**1 ServiceAccount / Role / RoleBinding per namespace**)
 - Fully compatible with **GKE Autopilot** and **Argo CD**
 
 ---
@@ -17,11 +17,11 @@ This document explains how to deploy **PostgreSQL as a StatefulSet** on Kubernet
 
 ### Key Principles
 
-- One database per namespace  
-- StatefulSet + PVC for persistence  
-- `pg_hba.conf` controls who can connect  
-- Snapshots are automated via CronJobs  
-- No ClusterRole required  
+- One database per namespace
+- StatefulSet + PVC for persistence
+- `pg_hba.conf` controls who can connect
+- Snapshots are automated via CronJobs
+- No ClusterRole required
 - Runtime snapshots are **not managed by Argo CD**
 
 ---
@@ -169,7 +169,47 @@ deletionPolicy: Delete
 
 ## 4️⃣ RBAC (Per Namespace)
 
-ServiceAccount, Role, RoleBinding (one-time per namespace).
+### ServiceAccount
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: db-backup-sa
+  namespace: default
+```
+
+### Role
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-manager
+  namespace: default
+rules:
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "create", "delete"]
+```
+
+### RoleBinding
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-manager-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: db-backup-sa
+    namespace: default
+roleRef:
+  kind: Role
+  name: snapshot-manager
+  apiGroup: rbac.authorization.k8s.io
+```
 
 ---
 
@@ -183,6 +223,9 @@ metadata:
   namespace: default
 spec:
   schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       template:
@@ -192,6 +235,13 @@ spec:
           containers:
             - name: snapshot
               image: bitnami/kubectl
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
               command:
                 - /bin/sh
                 - -c
@@ -211,7 +261,7 @@ spec:
 
 ---
 
-## 6️⃣ Snapshot Cleanup (7-day Retention)
+## 6️⃣ Snapshot Cleanup CronJob (7-Day Retention)
 
 ```yaml
 apiVersion: batch/v1
@@ -221,6 +271,9 @@ metadata:
   namespace: default
 spec:
   schedule: "30 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       template:
@@ -230,41 +283,47 @@ spec:
           containers:
             - name: cleanup
               image: bitnami/kubectl
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
               command:
                 - /bin/sh
                 - -c
                 - |
-                  kubectl get volumesnapshot \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}' \
-                  | while read name ts; do
+                  kubectl get volumesnapshot                     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}'                   | while read name ts; do
                       if [ $(date -d "$ts" +%s) -lt $(date -d "7 days ago" +%s) ]; then
                         kubectl delete volumesnapshot "$name"
                       fi
                     done
-
 ```
 
 ---
 
 ## 7️⃣ Where to Find Snapshots
 
-- Kubernetes: `kubectl get volumesnapshot -n default`
-- GCP Console: Compute Engine → Snapshots
+- Kubernetes:
+  ```bash
+  kubectl get volumesnapshot -n default
+  kubectl describe volumesnapshot <name> -n default
+  ```
+- GCP Console:
+  **Compute Engine → Snapshots**
 
 ---
 
 ## 8️⃣ Restore Flow (High-level)
 
-VolumeSnapshot → New PVC → Attach to StatefulSet → PostgreSQL WAL replay → Restored
+VolumeSnapshot → New PVC → Attach to StatefulSet → PostgreSQL WAL replay → Database restored
 
 ---
 
 ## 9️⃣ Argo CD Notes
 
-- Do NOT commit VolumeSnapshot YAMLs
-- CronJobs are Git-managed
-- Snapshots are runtime resources
-
----
-
+- ❌ Do NOT commit `VolumeSnapshot` YAMLs
+- ✅ CronJobs, RBAC, StatefulSet are Git-managed
+- ✅ Snapshots are runtime resources
 
